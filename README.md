@@ -1,25 +1,40 @@
-# Noble → EVM CCTP
+# USDC CCTP transfers
 
-This is a web page for moving USDC from Noble mainnet to an EVM chain with Circle CCTP V1. Keplr signs on both sides. The supported destinations are Avalanche, Ethereum, OP Mainnet, Arbitrum, Base, Polygon PoS and Unichain, chosen from a dropdown.
+This is a web page for moving USDC between chains with Circle CCTP. It covers Noble, Solana and 25 EVM chains. Pick a source and a destination, and the page chooses the route: CCTP V2 between any two chains that support it, or V1 for burns from Noble.
 
 Live: https://jasbanza.github.io/cctp/
 
-> **Deadline:** Circle is [discontinuing USDC and CCTP V1 on Noble](https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-and-cctp-v1-on-noble). Burn limits gradually drop to zero from Oct 31, 2026, and all routes pause on Jan 12, 2027.
+> **Noble deadline:** Circle is [discontinuing USDC and CCTP V1 on Noble](https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-and-cctp-v1-on-noble). Noble can already only send: every V1 TokenMessenger has had Noble removed, so nothing can be minted on Noble. Burn limits gradually drop to zero from Oct 31, 2026, and all routes pause on Jan 12, 2027.
+
+## Routes
+
+| From | To | Version |
+| --- | --- | --- |
+| Noble | Ethereum, Avalanche, OP Mainnet, Arbitrum, Base, Polygon PoS, Unichain, Solana | V1 |
+| Any EVM chain or Solana | Any other EVM chain or Solana | V2, Fast or Standard |
+
+The EVM chains are Ethereum, Avalanche, OP Mainnet, Arbitrum, Base, Polygon PoS, Unichain, Linea, Codex, Sonic, World Chain, Monad, Sei, XDC, HyperEVM, Ink, Plume, Arc, EDGE, Injective, Morph, Pharos, Cronos, Plasma and X Layer. BNB Smart Chain has V2 contracts but no USDC registered with them, so it is left out. Sui and the other non-EVM chains are not supported.
+
+## Wallets
+
+- **Noble:** Keplr.
+- **EVM:** any injected wallet. Wallets are discovered with EIP-6963, so MetaMask, Rabby, Keplr and others can be chosen from a list. The page switches chains, or adds a chain the wallet does not know yet.
+- **Solana:** any Wallet Standard wallet, such as Phantom, Solflare or Backpack.
 
 ## Features
 
-- **Status bar.** A status line is always visible, and a step tracker follows each transfer: burn on Noble, Circle attestation, mint on Avalanche, then complete.
-- **Amount helpers.** The page shows your balance, and Max fills in the balance minus the estimated fee, capped at Noble's burn limit for a single transfer.
-- **Automatic mint prompt.** Once Circle attests a transfer started on this page, Keplr asks you to sign the mint on the destination chain. If you decline, a Mint now button appears.
-- **History in the browser.** Transfers are saved in localStorage and resume after a refresh. Look up any Noble burn tx hash, or use "Find my burns on Noble" to pull your recent EVM burns from the chain.
-- **Links for each transfer.** Mintscan for the burn, [Range](https://usdc.range.org/usdc) for the CCTP status, and the destination chain's explorer for the mint and the recipient.
+- **Status bar and step tracker.** Each transfer moves through burn, Circle attestation, mint and complete.
+- **Fast or Standard on V2.** Fast settles in seconds and pays the fee Iris quotes, which is deducted from the amount. Standard is free on most routes but waits for source finality, about 15–20 minutes on Ethereum and its rollups.
+- **Automatic mint prompt.** Once Circle attests a transfer started on this page, the destination wallet asks you to sign the mint. If you decline, a Mint now button appears. On Solana, the page creates the recipient's USDC account first if it does not exist.
+- **History in the browser.** Transfers are saved in localStorage and resume after a refresh. Look up any burn by source chain and transaction hash, or use "Find my Noble burns" to pull your recent Noble burns from the chain.
 
-## How status is determined
+## How it works
 
-- **Burn.** Noble REST `/cosmos/tx/v1beta1/txs/{hash}`.
-- **Attestation.** Circle Iris `/v1/messages/4/{HASH}`. Iris only matches Noble hashes in uppercase without a `0x` prefix.
-- **Minted.** `usedNonces(keccak256(abi.encodePacked(uint32 4, uint64 nonce)))` on the destination's V1 MessageTransmitter. The addresses are in `src/chain.ts`, and each one was checked on-chain to report its own domain and V1.
-- **Range link.** `https://usdc.range.org/usdc/status?id=<base64url("noble-1/<nonce>")>`.
+- **Contracts.** `src/chains.ts` lists each chain's domain, USDC and CCTP contracts. Each was checked on-chain: the V2 MessageTransmitter reports its own domain, and the USDC is what the V2 TokenMinter maps Ethereum USDC to.
+- **Attestations.** Circle Iris `/v2/messages/{sourceDomain}?transactionHash=…` returns V1 and V2 messages alike. Hashes must match exactly: Noble's are uppercase without `0x`, EVM's are lowercase with `0x`, and Solana's are base58 signatures.
+- **Fees.** Iris `/v2/burn/USDC/fees/{src}/{dst}` quotes basis points for Fast (finality 1000) and Standard (2000). The page sets `maxFee` to the quoted fee, rounded up.
+- **Minted.** On EVM, `usedNonces` on the destination MessageTransmitter: `keccak256(abi.encodePacked(uint32 source, uint64 nonce))` for V1, and the bytes32 nonce for V2. On Solana, the used-nonce account of Circle's MessageTransmitter program.
+- **Solana instructions.** `deposit_for_burn` and `receive_message` are encoded by hand from Circle's IDLs in [circlefin/solana-cctp-contracts](https://github.com/circlefin/solana-cctp-contracts), which keeps Anchor out of the bundle.
 
 ## Run locally
 

@@ -1,13 +1,15 @@
 import { Registry } from "@cosmjs/proto-signing";
 import { SigningStargateClient, defaultRegistryTypes, type StdFee } from "@cosmjs/stargate";
 import type { Keplr } from "@keplr-wallet/types";
-import { encodeFunctionData, isAddress, pad, toBytes, type Hex } from "viem";
+import { encodeFunctionData, formatEther, isAddress, pad, toBytes, toHex, type Hex } from "viem";
 import { MsgDepositForBurn, MsgDepositForBurnTypeUrl } from "./cctpProto";
 import {
-  AVALANCHE,
+  DESTINATIONS,
   GAS_PRICE_UUSDC,
   NOBLE,
-  avalancheClient,
+  destination,
+  explorerAddressUrl,
+  explorerTxUrl,
   fetchAttestation,
   fetchBurnLimit,
   fetchCctpPaused,
@@ -16,9 +18,9 @@ import {
   isMinted,
   listNobleBurns,
   mintscanUrl,
+  publicClient,
   rangeUrl,
   receiveMessageAbi,
-  snowtraceUrl,
 } from "./chain";
 
 declare global {
@@ -32,6 +34,7 @@ type Status = "burning" | "attesting" | "ready" | "minting" | "complete" | "fail
 interface Transfer {
   burnTx: string;
   from: string;
+  domain: number; // CCTP destination domain
   recipient: string;
   amount: string; // uusdc
   createdAt: number;
@@ -48,6 +51,7 @@ interface Transfer {
 const STORE_KEY = "cctp:transfers";
 const CONNECTED_KEY = "cctp:connected";
 const LEGACY_PENDING_KEY = "cctp:pendingBurn";
+const DESTINATION_KEY = "cctp:destination";
 
 const $ = <T extends HTMLElement = HTMLInputElement>(id: string) => document.getElementById(id) as T;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -67,7 +71,8 @@ const wallet = {
   evm: "",
   client: undefined as SigningStargateClient | undefined,
   balance: undefined as bigint | undefined,
-  avax: undefined as bigint | undefined,
+  // Native gas balance of the EVM address, per destination domain.
+  gas: new Map<number, bigint>(),
   fee: undefined as StdFee | undefined,
   burnLimit: undefined as bigint | undefined,
   paused: false,
@@ -78,15 +83,26 @@ let notice: { text: string; tone: "idle" | "busy" | "ok" | "err" | "action" } | 
 const tracking = new Set<string>();
 const declined = new Set<string>();
 let mintInFlight = false;
+let selectedDomain = loadDestination();
+
+function loadDestination(): number {
+  try {
+    const d = Number(localStorage.getItem(DESTINATION_KEY));
+    if (DESTINATIONS.some((x) => x.domain === d)) return d;
+  } catch {}
+  return DESTINATIONS[0].domain;
+}
 
 function load(): Transfer[] {
   try {
     const list: Transfer[] = JSON.parse(localStorage.getItem(STORE_KEY) ?? "[]");
     const legacy = localStorage.getItem(LEGACY_PENDING_KEY);
     if (legacy && !list.some((t) => t.burnTx === legacy.toUpperCase())) {
-      list.unshift({ burnTx: legacy.toUpperCase(), from: "", recipient: "", amount: "0", createdAt: Date.now(), status: "burning", origin: "app" });
+      list.unshift({ burnTx: legacy.toUpperCase(), from: "", domain: 1, recipient: "", amount: "0", createdAt: Date.now(), status: "burning", origin: "app" });
     }
     localStorage.removeItem(LEGACY_PENDING_KEY);
+    // Transfers saved before multi-chain support were all to Avalanche.
+    for (const t of list) t.domain ??= 1;
     return list;
   } catch {
     return [];
@@ -145,7 +161,7 @@ async function connect() {
   wallet.client = await SigningStargateClient.connectWithSigner(NOBLE.rpc, signer, {
     registry: new Registry([...defaultRegistryTypes, [MsgDepositForBurnTypeUrl, MsgDepositForBurn]]),
   });
-  await evm("wallet_switchEthereumChain", [{ chainId: AVALANCHE.chainIdHex }]);
+  await switchChain(selectedDomain);
   wallet.evm = (await evm<string[]>("eth_requestAccounts"))[0];
   try {
     localStorage.setItem(CONNECTED_KEY, "1");
@@ -157,16 +173,26 @@ async function connect() {
   await scanBurns();
 }
 
+function switchChain(domain: number) {
+  return evm("wallet_switchEthereumChain", [{ chainId: toHex(destination(domain).chainId) }]);
+}
+
+async function refreshGas(domain: number) {
+  if (!wallet.evm) return;
+  wallet.gas.set(domain, await publicClient(domain).getBalance({ address: wallet.evm as Hex }));
+  render();
+}
+
 async function refreshBalances() {
   if (!wallet.client) return;
-  const [usdc, avax, limit, paused] = await Promise.all([
+  const [usdc, limit, paused] = await Promise.all([
     wallet.client.getBalance(wallet.noble, "uusdc"),
-    avalancheClient.getBalance({ address: wallet.evm as Hex }),
     fetchBurnLimit(),
     fetchCctpPaused(),
   ]);
+  const domains = new Set([selectedDomain, ...transfers.filter((t) => t.status === "ready").map((t) => t.domain)]);
+  await Promise.all([...domains].map((d) => refreshGas(d).catch(() => {})));
   wallet.balance = BigInt(usdc.amount);
-  wallet.avax = avax;
   wallet.burnLimit = limit;
   wallet.paused = paused;
   wallet.fee = await estimateFee();
@@ -176,7 +202,7 @@ async function refreshBalances() {
 // Gas is simulated with a 1 uusdc burn; the fee does not depend on the amount.
 // Simulation fails on an empty balance, so fall back to a limit above the ~110k a burn uses.
 async function estimateFee(): Promise<StdFee> {
-  const gas = await wallet.client!.simulate(wallet.noble, [burnMsg("1", wallet.evm)], "").catch(() => 200_000);
+  const gas = await wallet.client!.simulate(wallet.noble, [burnMsg("1", wallet.evm, selectedDomain)], "").catch(() => 200_000);
   const gasLimit = Math.ceil(gas * 1.5);
   return { amount: [{ denom: "uusdc", amount: Math.ceil(gasLimit * GAS_PRICE_UUSDC).toString() }], gas: gasLimit.toString() };
 }
@@ -198,13 +224,13 @@ function toMicroUsdc(input: string): bigint {
   return BigInt(match[1]) * 1_000_000n + BigInt((match[2] ?? "").padEnd(6, "0"));
 }
 
-function burnMsg(amount: string, recipient: string) {
+function burnMsg(amount: string, recipient: string, domain: number) {
   return {
     typeUrl: MsgDepositForBurnTypeUrl,
     value: {
       from: wallet.noble,
       amount,
-      destinationDomain: AVALANCHE.domain,
+      destinationDomain: domain,
       mintRecipient: toBytes(pad(recipient as Hex, { size: 32 })),
       burnToken: "uusdc",
     },
@@ -219,11 +245,13 @@ async function burn() {
   if (amount <= 0n) throw new Error("Enter an amount greater than zero");
   if (amount > maxAmount()) throw new Error(`Amount exceeds the maximum of ${formatUsdc(maxAmount())} USDC`);
 
-  setNotice("Approve the burn in Keplr…", "action");
-  const hash = await wallet.client.signAndBroadcastSync(wallet.noble, [burnMsg(amount.toString(), recipient)], wallet.fee);
+  const domain = selectedDomain;
+  setNotice(`Approve the burn to ${destination(domain).name} in Keplr…`, "action");
+  const hash = await wallet.client.signAndBroadcastSync(wallet.noble, [burnMsg(amount.toString(), recipient, domain)], wallet.fee);
   const t = addTransfer({
     burnTx: hash.toUpperCase(),
     from: wallet.noble,
+    domain,
     recipient,
     amount: amount.toString(),
     createdAt: Date.now(),
@@ -262,9 +290,9 @@ async function step(t: Transfer) {
     case "burning": {
       const burn = await fetchNobleBurn(t.burnTx);
       if (burn === undefined) return sleep(3000);
-      if (burn === null) return update(t, { status: "failed", error: "Not a Noble → Avalanche CCTP burn" });
+      if (burn === null) return update(t, { status: "failed", error: "Not a CCTP burn to a supported EVM chain" });
       if (burn.failed) return update(t, { status: "failed", error: "Burn transaction failed on Noble" });
-      update(t, { status: "attesting", from: burn.from, recipient: burn.recipient, amount: burn.amount, createdAt: burn.timestamp, error: undefined });
+      update(t, { status: "attesting", from: burn.from, domain: burn.domain, recipient: burn.recipient, amount: burn.amount, createdAt: burn.timestamp, error: undefined });
       refreshBalances().catch(() => {});
       return;
     }
@@ -275,13 +303,13 @@ async function step(t: Transfer) {
       return markMintedOrReady(t);
     }
     case "ready": {
-      if (wallet.evm && wallet.avax !== 0n && t.origin === "app" && !declined.has(t.burnTx) && !mintInFlight) return mint(t);
+      if (wallet.evm && hasGas(t.domain) && t.origin === "app" && !declined.has(t.burnTx) && !mintInFlight) return mint(t);
       await sleep(10_000);
       return markMintedOrReady(t);
     }
     case "minting": {
       if (!t.mintTx) return update(t, { status: "ready" });
-      const receipt = await avalancheClient.waitForTransactionReceipt({ hash: t.mintTx as Hex, timeout: 120_000 });
+      const receipt = await publicClient(t.domain).waitForTransactionReceipt({ hash: t.mintTx as Hex, timeout: 120_000 });
       if (receipt.status === "success") {
         update(t, { status: "complete", error: undefined });
         refreshBalances().catch(() => {});
@@ -294,11 +322,12 @@ async function step(t: Transfer) {
 }
 
 async function markMintedOrReady(t: Transfer) {
-  if (await isMinted(t.nonce!)) {
+  if (await isMinted(t.domain, t.nonce!)) {
     const mintTx = t.mintTx ?? (await fetchRangeMintTx(t.nonce!).catch(() => undefined));
     update(t, { status: "complete", mintTx, error: undefined });
   } else if (t.status !== "ready") {
     update(t, { status: "ready" });
+    refreshGas(t.domain).catch(() => {});
   }
 }
 
@@ -306,12 +335,13 @@ async function mint(t: Transfer) {
   if (mintInFlight) return;
   mintInFlight = true;
   try {
-    if (await isMinted(t.nonce!)) return markMintedOrReady(t);
+    if (await isMinted(t.domain, t.nonce!)) return markMintedOrReady(t);
+    const dest = destination(t.domain);
     selected = t.burnTx;
-    setNotice(`Attestation ready. Approve the ${formatUsdc(t.amount)} USDC mint on Avalanche in Keplr…`, "action");
-    await evm("wallet_switchEthereumChain", [{ chainId: AVALANCHE.chainIdHex }]);
+    setNotice(`Attestation ready. Approve the ${formatUsdc(t.amount)} USDC mint on ${dest.name} in Keplr…`, "action");
+    await switchChain(t.domain);
     const data = encodeFunctionData({ abi: receiveMessageAbi, functionName: "receiveMessage", args: [t.message!, t.attestation!] });
-    const mintTx = await evm<string>("eth_sendTransaction", [{ from: wallet.evm, to: AVALANCHE.messageTransmitter, data }]);
+    const mintTx = await evm<string>("eth_sendTransaction", [{ from: wallet.evm, to: dest.messageTransmitter, data }]);
     notice = undefined;
     log(`Mint broadcast: ${mintTx}`);
     update(t, { status: "minting", mintTx, error: undefined });
@@ -341,9 +371,9 @@ async function lookup() {
   setNotice("Looking up burn on Noble…", "busy");
   const burn = await fetchNobleBurn(hash);
   if (burn === undefined) throw new Error("Transaction not found on Noble");
-  if (burn === null) throw new Error("That transaction is not a Noble → Avalanche CCTP burn");
+  if (burn === null) throw new Error("That transaction is not a CCTP burn to a supported EVM chain");
   if (burn.failed) throw new Error("That burn failed on Noble");
-  const t = addTransfer({ burnTx: burn.hash, from: burn.from, recipient: burn.recipient, amount: burn.amount, createdAt: burn.timestamp, status: "attesting", origin: "found" });
+  const t = addTransfer({ burnTx: burn.hash, from: burn.from, domain: burn.domain, recipient: burn.recipient, amount: burn.amount, createdAt: burn.timestamp, status: "attesting", origin: "found" });
   selected = t.burnTx;
   $("lookup").value = "";
   notice = undefined;
@@ -357,10 +387,10 @@ async function scanBurns() {
   let added = 0;
   for (const b of burns) {
     if (transfers.some((t) => t.burnTx === b.hash)) continue;
-    addTransfer({ burnTx: b.hash, from: b.from, recipient: b.recipient, amount: b.amount, createdAt: b.timestamp, status: "attesting", origin: "found" });
+    addTransfer({ burnTx: b.hash, from: b.from, domain: b.domain, recipient: b.recipient, amount: b.amount, createdAt: b.timestamp, status: "attesting", origin: "found" });
     added++;
   }
-  log(`Found ${burns.length} Avalanche burns on Noble for this address (${added} new)`);
+  log(`Found ${burns.length} EVM burns on Noble for this address (${added} new)`);
   resumeAll();
   render();
 }
@@ -370,6 +400,9 @@ function resumeAll() {
 }
 
 // ---------- rendering ----------
+
+// An unknown balance counts as having gas, so a slow RPC does not hold back the mint prompt.
+const hasGas = (domain: number) => wallet.gas.get(domain) !== 0n;
 
 const STATUS_LABEL: Record<Status, string> = {
   burning: "Burning",
@@ -386,21 +419,22 @@ function statusLine(): { text: string; tone: NonNullable<typeof notice>["tone"] 
   const elapsed = active ? ` (${Math.max(0, Math.round((Date.now() - active.createdAt) / 1000))}s)` : "";
   if (active) {
     const amt = `${formatUsdc(active.amount)} USDC`;
+    const dest = destination(active.domain);
     switch (active.status) {
       case "burning": return { text: `Waiting for the Noble burn of ${amt} to confirm…`, tone: "busy" };
       case "attesting": return { text: `Burn confirmed. Waiting for Circle's attestation${active.origin === "app" ? elapsed : ""}…`, tone: "busy" };
       case "ready":
-        if (wallet.avax === 0n) return { text: `${amt} is attested, but your Avalanche address has no AVAX for the mint's gas. Add AVAX, or wait: public relayers often mint Noble burns for free.`, tone: "action" };
+        if (!hasGas(active.domain)) return { text: `${amt} is attested, but your ${dest.name} address has no ${dest.gasSymbol} for the mint's gas. Add ${dest.gasSymbol}, or wait: public relayers often mint Noble burns for free.`, tone: "action" };
         return wallet.evm
-          ? { text: `${amt} is attested and ready to mint on Avalanche.${declined.has(active.burnTx) ? " Click Mint now to sign." : ""}`, tone: "action" }
-          : { text: `${amt} is attested. Connect Keplr to mint it on Avalanche.`, tone: "action" };
-      case "minting": return { text: `Waiting for the Avalanche mint to confirm…`, tone: "busy" };
+          ? { text: `${amt} is attested and ready to mint on ${dest.name}.${declined.has(active.burnTx) ? " Click Mint now to sign." : ""}`, tone: "action" }
+          : { text: `${amt} is attested. Connect Keplr to mint it on ${dest.name}.`, tone: "action" };
+      case "minting": return { text: `Waiting for the ${dest.name} mint to confirm…`, tone: "busy" };
       case "failed": return { text: `Transfer failed: ${active.error ?? "unknown error"}`, tone: "err" };
     }
   }
   if (wallet.paused) return { text: "CCTP burning and minting is currently paused on Noble.", tone: "err" };
   if (!wallet.client) return { text: "Connect Keplr to start a transfer.", tone: "idle" };
-  if (active?.status === "complete") return { text: `Last transfer complete: ${formatUsdc(active.amount)} USDC delivered on Avalanche.`, tone: "ok" };
+  if (active?.status === "complete") return { text: `Last transfer complete: ${formatUsdc(active.amount)} USDC delivered on ${destination(active.domain).name}.`, tone: "ok" };
   return { text: "Ready. Enter an amount to transfer.", tone: "ok" };
 }
 
@@ -429,11 +463,14 @@ function render() {
   renderStatus();
 
   $("connect").textContent = wallet.client ? "Refresh" : "Connect Keplr";
+  const dest = destination(selectedDomain);
+  const gas = wallet.gas.get(selectedDomain);
   $("accounts").innerHTML = wallet.client
-    ? `<div class="mono">Noble: ${esc(wallet.noble)}</div><div class="mono">Avalanche: ${esc(wallet.evm)} · ${
-        wallet.avax === undefined ? "–" : (Number(wallet.avax) / 1e18).toFixed(4)
-      } AVAX</div>`
+    ? `<div class="mono">Noble: ${esc(wallet.noble)}</div><div class="mono">EVM: ${esc(wallet.evm)} · ${
+        gas === undefined ? "–" : Number(formatEther(gas)).toFixed(4)
+      } ${dest.gasSymbol} on ${dest.name}</div>`
     : "Not connected.";
+  $<HTMLSelectElement>("destination").value = String(selectedDomain);
   $("balance").textContent = wallet.balance === undefined ? "–" : `${formatUsdc(wallet.balance)} USDC`;
   $<HTMLButtonElement>("max").disabled = maxAmount() === 0n;
   $<HTMLButtonElement>("burn").disabled = !wallet.client || !wallet.fee || wallet.paused;
@@ -441,24 +478,25 @@ function render() {
   $("fee-info").textContent = wallet.fee
     ? `Network fee ≈ ${formatUsdc(feeAmount())} USDC (paid on Noble). Per-transfer burn limit: ${
         wallet.burnLimit === undefined ? "–" : formatUsdc(wallet.burnLimit)
-      } USDC. Minting on Avalanche needs a little AVAX for gas.`
+      } USDC. Minting on ${dest.name} needs a little ${dest.gasSymbol} for gas.`
     : "";
 
   const active = transfers.find((t) => t.burnTx === selected);
   $("active").hidden = !active;
   if (active) {
+    const activeDest = destination(active.domain);
     const states = stepStates(active);
     const steps = [
       { title: "Burn on Noble", detail: `${formatUsdc(active.amount)} USDC · ${link(mintscanUrl(active.burnTx), short(active.burnTx))}` },
       { title: "Circle attestation", detail: active.nonce ? `Nonce ${active.nonce} · ${link(rangeUrl(active.nonce), "Range")}` : "Usually under a minute after the burn confirms" },
-      { title: "Mint on Avalanche", detail: active.mintTx ? link(snowtraceUrl(active.mintTx), short(active.mintTx)) : `To ${esc(active.recipient ? short(active.recipient) : "…")}` },
-      { title: "Complete", detail: active.status === "complete" ? "USDC delivered on Avalanche" : "" },
+      { title: `Mint on ${activeDest.name}`, detail: active.mintTx ? link(explorerTxUrl(active.domain, active.mintTx), short(active.mintTx)) : `To ${active.recipient ? link(explorerAddressUrl(active.domain, active.recipient), short(active.recipient)) : "…"}` },
+      { title: "Complete", detail: active.status === "complete" ? `USDC delivered on ${activeDest.name}` : "" },
     ];
     $("steps").innerHTML = steps
       .map((st, i) => `<li data-state="${states[i]}"><span class="icon">${states[i] === "done" ? "✓" : states[i] === "error" ? "!" : i + 1}</span><div><div class="title">${st.title}</div><div class="muted">${st.detail}</div></div></li>`)
       .join("");
     $("active-summary").textContent = new Date(active.createdAt).toLocaleString();
-    const showMint = active.status === "ready" && (declined.has(active.burnTx) || active.origin === "found" || !wallet.evm || wallet.avax === 0n);
+    const showMint = active.status === "ready" && (declined.has(active.burnTx) || active.origin === "found" || !wallet.evm || !hasGas(active.domain));
     $("active-actions").innerHTML =
       (active.error && active.status !== "failed" ? `<p class="muted" style="color: var(--err)">${esc(active.error)}</p>` : "") +
       (showMint ? `<button data-mint="${active.burnTx}" ${wallet.evm ? "" : "disabled"}>Mint now</button>` : "");
@@ -467,8 +505,8 @@ function render() {
   $("history-empty").hidden = transfers.length > 0;
   $("history").innerHTML = transfers
     .map((t) => {
-      const links = [link(mintscanUrl(t.burnTx), "Noble"), t.nonce ? link(rangeUrl(t.nonce), "Range") : "", t.mintTx ? link(snowtraceUrl(t.mintTx), "Avalanche") : ""].filter(Boolean).join(" · ");
-      return `<tr data-select="${t.burnTx}" class="${t.burnTx === selected ? "selected" : ""}"><td>${new Date(t.createdAt).toLocaleString()}</td><td>${formatUsdc(t.amount)}</td><td class="mono">${esc(short(t.recipient || "…"))}</td><td><span class="pill ${t.status}">${STATUS_LABEL[t.status]}</span></td><td>${links}</td></tr>`;
+      const links = [link(mintscanUrl(t.burnTx), "Noble"), t.nonce ? link(rangeUrl(t.nonce), "Range") : "", t.mintTx ? link(explorerTxUrl(t.domain, t.mintTx), destination(t.domain).name) : ""].filter(Boolean).join(" · ");
+      return `<tr data-select="${t.burnTx}" class="${t.burnTx === selected ? "selected" : ""}"><td>${new Date(t.createdAt).toLocaleString()}</td><td>${formatUsdc(t.amount)}</td><td>${esc(destination(t.domain).name)}</td><td class="mono">${t.recipient ? link(explorerAddressUrl(t.domain, t.recipient), short(t.recipient)) : "…"}</td><td><span class="pill ${t.status}">${STATUS_LABEL[t.status]}</span></td><td>${links}</td></tr>`;
     })
     .join("");
 }
@@ -494,6 +532,15 @@ $("connect").addEventListener("click", guard(async () => (wallet.client ? refres
 $("burn").addEventListener("click", guard(burn));
 $("lookup-btn").addEventListener("click", guard(lookup));
 $("scan").addEventListener("click", guard(scanBurns));
+$("destination").innerHTML = DESTINATIONS.map((d) => `<option value="${d.domain}">${esc(d.name)}</option>`).join("");
+$("destination").addEventListener("change", () => {
+  selectedDomain = Number($<HTMLSelectElement>("destination").value);
+  try {
+    localStorage.setItem(DESTINATION_KEY, String(selectedDomain));
+  } catch {}
+  render();
+  if (wallet.evm) refreshGas(selectedDomain).catch(() => {});
+});
 $("max").addEventListener("click", () => {
   $("amount").value = formatUsdc(maxAmount());
 });

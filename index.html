@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Noble → Avalanche CCTP</title>
+    <title>Noble → EVM CCTP</title>
     <style>
       :root {
         --bg: #f7f7f8; --card: #fff; --text: #111; --muted: #666; --border: #e2e2e6;
@@ -19,7 +19,7 @@
       h2 { font-size: 1rem; margin: 0 0 .75rem; }
       a { color: var(--accent); }
       section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; margin-top: 1rem; }
-      input { width: 100%; padding: .5rem; font: inherit; font-family: ui-monospace, monospace; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+      input, select { width: 100%; padding: .5rem; font: inherit; font-family: ui-monospace, monospace; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
       label { display: block; font-size: .85rem; color: var(--muted); margin-top: .5rem; }
       button { font: inherit; padding: .5rem 1rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
       button.ghost { background: transparent; color: var(--accent); padding: .2rem .5rem; }
@@ -63,7 +63,7 @@
   <body>
     <div id="status" data-tone="idle"><span class="dot"></span><span id="status-text">Loading…</span></div>
     <main>
-      <h1>Noble → Avalanche USDC (CCTP V1)</h1>
+      <h1>Noble → EVM USDC (CCTP V1)</h1>
       <p class="muted">Circle is phasing out CCTP on Noble: burn limits start dropping to zero on Oct 31, 2026, and all routes pause on Jan 12, 2027.</p>
 
       <section>
@@ -81,7 +81,9 @@
           <span class="muted">Balance: <span id="balance">–</span> <button class="ghost" id="max" disabled>Max</button></span>
         </div>
         <input id="amount" placeholder="0.00" inputmode="decimal" />
-        <label for="recipient">Avalanche recipient</label>
+        <label for="destination">Destination chain</label>
+        <select id="destination"></select>
+        <label for="recipient">Recipient address (EVM)</label>
         <input id="recipient" placeholder="0x…" />
         <p class="muted" id="fee-info"></p>
         <button id="burn" disabled>Burn on Noble</button>
@@ -107,7 +109,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Date</th><th>Amount</th><th>Recipient</th><th>Status</th><th>Links</th></tr></thead>
+            <thead><tr><th>Date</th><th>Amount</th><th>To</th><th>Recipient</th><th>Status</th><th>Links</th></tr></thead>
             <tbody id="history"></tbody>
           </table>
         </div>
@@ -120,6 +122,9 @@
           <pre id="log"></pre>
         </details>
       </section>
+      <footer class="muted" style="margin-top: 1.5rem; text-align: center">
+        <a href="https://github.com/jasbanza/cctp" target="_blank" rel="noopener">github.com/jasbanza/cctp</a>
+      </footer>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

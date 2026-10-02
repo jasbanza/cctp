@@ -173,9 +173,10 @@ async function refreshBalances() {
   render();
 }
 
-// Gas is simulated once with a 1 uusdc burn; the fee does not depend on the amount.
+// Gas is simulated with a 1 uusdc burn; the fee does not depend on the amount.
+// Simulation fails on an empty balance, so fall back to a limit above the ~110k a burn uses.
 async function estimateFee(): Promise<StdFee> {
-  const gas = await wallet.client!.simulate(wallet.noble, [burnMsg("1", wallet.evm)], "");
+  const gas = await wallet.client!.simulate(wallet.noble, [burnMsg("1", wallet.evm)], "").catch(() => 200_000);
   const gasLimit = Math.ceil(gas * 1.5);
   return { amount: [{ denom: "uusdc", amount: Math.ceil(gasLimit * GAS_PRICE_UUSDC).toString() }], gas: gasLimit.toString() };
 }
@@ -274,7 +275,7 @@ async function step(t: Transfer) {
       return markMintedOrReady(t);
     }
     case "ready": {
-      if (wallet.evm && t.origin === "app" && !declined.has(t.burnTx) && !mintInFlight) return mint(t);
+      if (wallet.evm && wallet.avax !== 0n && t.origin === "app" && !declined.has(t.burnTx) && !mintInFlight) return mint(t);
       await sleep(10_000);
       return markMintedOrReady(t);
     }
@@ -389,6 +390,7 @@ function statusLine(): { text: string; tone: NonNullable<typeof notice>["tone"] 
       case "burning": return { text: `Waiting for the Noble burn of ${amt} to confirm…`, tone: "busy" };
       case "attesting": return { text: `Burn confirmed. Waiting for Circle's attestation${active.origin === "app" ? elapsed : ""}…`, tone: "busy" };
       case "ready":
+        if (wallet.avax === 0n) return { text: `${amt} is attested, but your Avalanche address has no AVAX for the mint's gas. Add AVAX, or wait: public relayers often mint Noble burns for free.`, tone: "action" };
         return wallet.evm
           ? { text: `${amt} is attested and ready to mint on Avalanche.${declined.has(active.burnTx) ? " Click Mint now to sign." : ""}`, tone: "action" }
           : { text: `${amt} is attested. Connect Keplr to mint it on Avalanche.`, tone: "action" };
@@ -456,7 +458,7 @@ function render() {
       .map((st, i) => `<li data-state="${states[i]}"><span class="icon">${states[i] === "done" ? "✓" : states[i] === "error" ? "!" : i + 1}</span><div><div class="title">${st.title}</div><div class="muted">${st.detail}</div></div></li>`)
       .join("");
     $("active-summary").textContent = new Date(active.createdAt).toLocaleString();
-    const showMint = active.status === "ready" && (declined.has(active.burnTx) || active.origin === "found" || !wallet.evm);
+    const showMint = active.status === "ready" && (declined.has(active.burnTx) || active.origin === "found" || !wallet.evm || wallet.avax === 0n);
     $("active-actions").innerHTML =
       (active.error && active.status !== "failed" ? `<p class="muted" style="color: var(--err)">${esc(active.error)}</p>` : "") +
       (showMint ? `<button data-mint="${active.burnTx}" ${wallet.evm ? "" : "disabled"}>Mint now</button>` : "");

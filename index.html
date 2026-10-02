@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Noble → Avalanche CCTP</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 16px; background: #fff; color: #111; }
+      section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+      h2 { margin: 0 0 .5rem; font-size: 1.05rem; }
+      input { width: 100%; box-sizing: border-box; padding: .4rem; margin: .25rem 0 .5rem; font-family: monospace; }
+      button { padding: .45rem .9rem; cursor: pointer; }
+      button:disabled { cursor: not-allowed; opacity: .5; }
+      .muted { color: #666; font-size: .9rem; word-break: break-all; }
+      #log { white-space: pre-wrap; font-family: monospace; font-size: .85rem; background: #f6f6f6; padding: .75rem; border-radius: 6px; min-height: 3rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Noble → Avalanche (CCTP V1)</h1>
+    <p class="muted">Circle phases out CCTP on Noble: burn limits start dropping to zero on Oct 31, 2026, and all routes pause on Jan 12, 2027.</p>
+
+    <section>
+      <h2>1. Connect Keplr</h2>
+      <button id="connect">Connect</button>
+      <p class="muted" id="accounts"></p>
+    </section>
+
+    <section>
+      <h2>2. Burn USDC on Noble</h2>
+      <label>Amount (USDC)<input id="amount" placeholder="1.00" /></label>
+      <label>Avalanche recipient<input id="recipient" placeholder="0x…" /></label>
+      <button id="burn" disabled>Burn</button>
+    </section>
+
+    <section>
+      <h2>3–4. Attest and mint on Avalanche</h2>
+      <label>Noble burn tx hash (filled in automatically, or paste one to resume)<input id="txhash" /></label>
+      <button id="mint" disabled>Wait for attestation and mint</button>
+    </section>
+
+    <div id="log"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

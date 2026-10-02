@@ -5,40 +5,122 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Noble → Avalanche CCTP</title>
     <style>
-      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 16px; background: #fff; color: #111; }
-      section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-      h2 { margin: 0 0 .5rem; font-size: 1.05rem; }
-      input { width: 100%; box-sizing: border-box; padding: .4rem; margin: .25rem 0 .5rem; font-family: monospace; }
-      button { padding: .45rem .9rem; cursor: pointer; }
-      button:disabled { cursor: not-allowed; opacity: .5; }
-      .muted { color: #666; font-size: .9rem; word-break: break-all; }
-      #log { white-space: pre-wrap; font-family: monospace; font-size: .85rem; background: #f6f6f6; padding: .75rem; border-radius: 6px; min-height: 3rem; }
+      :root {
+        --bg: #f7f7f8; --card: #fff; --text: #111; --muted: #666; --border: #e2e2e6;
+        --accent: #2563eb; --ok: #16a34a; --warn: #d97706; --err: #dc2626;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root { --bg: #0f1115; --card: #171a21; --text: #e8e8ea; --muted: #9a9aa3; --border: #2a2e38; --accent: #60a5fa; }
+      }
+      * { box-sizing: border-box; }
+      body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; }
+      main { max-width: 760px; margin: 0 auto; padding: 0 16px 3rem; }
+      h1 { font-size: 1.3rem; margin: 1.25rem 0 .25rem; }
+      h2 { font-size: 1rem; margin: 0 0 .75rem; }
+      a { color: var(--accent); }
+      section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; margin-top: 1rem; }
+      input { width: 100%; padding: .5rem; font: inherit; font-family: ui-monospace, monospace; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+      label { display: block; font-size: .85rem; color: var(--muted); margin-top: .5rem; }
+      button { font: inherit; padding: .5rem 1rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+      button.ghost { background: transparent; color: var(--accent); padding: .2rem .5rem; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      .muted { color: var(--muted); font-size: .85rem; }
+      .mono { font-family: ui-monospace, monospace; word-break: break-all; }
+      .row { display: flex; gap: .5rem; align-items: center; }
+      .row > input { flex: 1; }
+      .between { display: flex; justify-content: space-between; align-items: center; gap: .5rem; flex-wrap: wrap; }
+
+      #status { position: sticky; top: 0; z-index: 1; display: flex; gap: .6rem; align-items: center; padding: .7rem 16px; background: var(--card); border-bottom: 1px solid var(--border); font-size: .95rem; }
+      #status .dot { width: .65rem; height: .65rem; border-radius: 50%; flex: none; background: var(--muted); }
+      #status[data-tone="busy"] .dot { background: var(--warn); animation: pulse 1.2s infinite; }
+      #status[data-tone="ok"] .dot { background: var(--ok); }
+      #status[data-tone="err"] .dot { background: var(--err); }
+      #status[data-tone="action"] .dot { background: var(--accent); animation: pulse 1.2s infinite; }
+      @keyframes pulse { 50% { opacity: .3; } }
+
+      .steps { list-style: none; padding: 0; margin: 0; }
+      .steps li { display: flex; gap: .75rem; padding: .5rem 0; }
+      .steps .icon { width: 1.6rem; height: 1.6rem; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: .8rem; border: 2px solid var(--border); color: var(--muted); }
+      .steps li[data-state="done"] .icon { background: var(--ok); border-color: var(--ok); color: #fff; }
+      .steps li[data-state="active"] .icon { border-color: var(--warn); color: var(--warn); animation: pulse 1.2s infinite; }
+      .steps li[data-state="action"] .icon { border-color: var(--accent); color: var(--accent); }
+      .steps li[data-state="error"] .icon { background: var(--err); border-color: var(--err); color: #fff; }
+      .steps .title { font-weight: 600; }
+
+      table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+      th, td { text-align: left; padding: .45rem .35rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+      tr.selected td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+      tbody tr { cursor: pointer; }
+      .pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; border: 1px solid currentColor; white-space: nowrap; }
+      .pill.complete { color: var(--ok); }
+      .pill.failed { color: var(--err); }
+      .pill.ready { color: var(--accent); }
+      .pill.burning, .pill.attesting, .pill.minting { color: var(--warn); }
+      .table-wrap { overflow-x: auto; }
+      details pre { white-space: pre-wrap; font-size: .8rem; max-height: 240px; overflow: auto; }
     </style>
   </head>
   <body>
-    <h1>Noble → Avalanche (CCTP V1)</h1>
-    <p class="muted">Circle phases out CCTP on Noble: burn limits start dropping to zero on Oct 31, 2026, and all routes pause on Jan 12, 2027.</p>
+    <div id="status" data-tone="idle"><span class="dot"></span><span id="status-text">Loading…</span></div>
+    <main>
+      <h1>Noble → Avalanche USDC (CCTP V1)</h1>
+      <p class="muted">Circle is phasing out CCTP on Noble: burn limits start dropping to zero on Oct 31, 2026, and all routes pause on Jan 12, 2027.</p>
 
-    <section>
-      <h2>1. Connect Keplr</h2>
-      <button id="connect">Connect</button>
-      <p class="muted" id="accounts"></p>
-    </section>
+      <section>
+        <div class="between">
+          <h2>Wallet</h2>
+          <button id="connect">Connect Keplr</button>
+        </div>
+        <div id="accounts" class="muted">Not connected.</div>
+      </section>
 
-    <section>
-      <h2>2. Burn USDC on Noble</h2>
-      <label>Amount (USDC)<input id="amount" placeholder="1.00" /></label>
-      <label>Avalanche recipient<input id="recipient" placeholder="0x…" /></label>
-      <button id="burn" disabled>Burn</button>
-    </section>
+      <section>
+        <h2>New transfer</h2>
+        <div class="between">
+          <label for="amount" style="margin: 0">Amount (USDC)</label>
+          <span class="muted">Balance: <span id="balance">–</span> <button class="ghost" id="max" disabled>Max</button></span>
+        </div>
+        <input id="amount" placeholder="0.00" inputmode="decimal" />
+        <label for="recipient">Avalanche recipient</label>
+        <input id="recipient" placeholder="0x…" />
+        <p class="muted" id="fee-info"></p>
+        <button id="burn" disabled>Burn on Noble</button>
+      </section>
 
-    <section>
-      <h2>3–4. Attest and mint on Avalanche</h2>
-      <label>Noble burn tx hash (filled in automatically, or paste one to resume)<input id="txhash" /></label>
-      <button id="mint" disabled>Wait for attestation and mint</button>
-    </section>
+      <section id="active" hidden>
+        <div class="between">
+          <h2>Transfer progress</h2>
+          <span class="muted mono" id="active-summary"></span>
+        </div>
+        <ol class="steps" id="steps"></ol>
+        <div id="active-actions"></div>
+      </section>
 
-    <div id="log"></div>
+      <section>
+        <div class="between">
+          <h2>History</h2>
+          <button class="ghost" id="scan" disabled>Find my burns on Noble</button>
+        </div>
+        <div class="row">
+          <input id="lookup" placeholder="Look up a Noble burn tx hash" />
+          <button id="lookup-btn">Look up</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Amount</th><th>Recipient</th><th>Status</th><th>Links</th></tr></thead>
+            <tbody id="history"></tbody>
+          </table>
+        </div>
+        <p class="muted" id="history-empty">No transfers yet.</p>
+      </section>
+
+      <section>
+        <details>
+          <summary class="muted">Activity log</summary>
+          <pre id="log"></pre>
+        </details>
+      </section>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

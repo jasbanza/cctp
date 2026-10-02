@@ -1,25 +1,31 @@
 # Noble → Avalanche CCTP
 
-A small local web page for moving USDC from Noble mainnet to Avalanche C-Chain with Circle CCTP V1. It signs with Keplr for both chains.
+This is a web page for moving USDC from Noble mainnet to Avalanche C-Chain with Circle CCTP V1. Keplr signs on both chains.
 
-> **Deadline:** Circle is [discontinuing USDC and CCTP V1 on Noble](https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-and-cctp-v1-on-noble). From Oct 31, 2026, burn limits gradually drop to zero, and all routes pause on Jan 12, 2027.
+Live: https://jasbanza.github.io/cctp/
 
-## Run
+> **Deadline:** Circle is [discontinuing USDC and CCTP V1 on Noble](https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-and-cctp-v1-on-noble). Burn limits gradually drop to zero from Oct 31, 2026, and all routes pause on Jan 12, 2027.
+
+## Features
+
+- **Status bar.** A status line is always visible, and a step tracker follows each transfer: burn on Noble, Circle attestation, mint on Avalanche, then complete.
+- **Amount helpers.** The page shows your balance, and Max fills in the balance minus the estimated fee, capped at Noble's burn limit for a single transfer.
+- **Automatic mint prompt.** Once Circle attests a transfer started on this page, Keplr asks you to sign the Avalanche mint. If you decline, a Mint now button appears.
+- **History in the browser.** Transfers are saved in localStorage and resume after a refresh. Look up any Noble burn tx hash, or use "Find my burns on Noble" to pull your recent Avalanche burns from the chain.
+- **Links for each transfer.** Mintscan for the burn, [Range](https://usdc.range.org/usdc) for the CCTP status, and Snowtrace for the mint.
+
+## How status is determined
+
+- **Burn.** Noble REST `/cosmos/tx/v1beta1/txs/{hash}`.
+- **Attestation.** Circle Iris `/v1/messages/4/{HASH}`. Iris only matches Noble hashes in uppercase without a `0x` prefix.
+- **Minted.** `usedNonces(keccak256(abi.encodePacked(uint32 4, uint64 nonce)))` on the Avalanche V1 MessageTransmitter, `0x8186359aF5F57FbB40c6b14A588d2A59C0C29880`.
+- **Range link.** `https://usdc.range.org/usdc/status?id=<base64url("noble-1/<nonce>")>`.
+
+## Run locally
 
 ```
 npm install
 npm run dev
 ```
 
-Open the printed URL in a browser where Keplr is installed.
-
-## How it works
-
-1. **Connect.** The page connects Keplr to `noble-1` and Keplr's EVM provider to Avalanche (43114). You need a little AVAX for the mint transaction.
-2. **Burn.** It sends `MsgDepositForBurn` on Noble with destination domain 1. The Noble fee is paid in USDC.
-3. **Attest.** It polls Circle's Iris API at `/v1/messages/4/0x{txHash}` until the attestation is signed, which usually takes under a minute.
-4. **Mint.** It calls `receiveMessage(message, attestation)` on the Avalanche V1 MessageTransmitter, `0x8186359aF5F57FbB40c6b14A588d2A59C0C29880`.
-
-The page saves the burn tx hash in localStorage, so a transfer interrupted by a reload can be resumed. You can also paste any Noble burn tx hash to finish its mint.
-
-Try a 1 USDC transfer first.
+Pushes to `main` deploy to GitHub Pages through `.github/workflows/pages.yml`.

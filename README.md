@@ -26,7 +26,7 @@ The EVM chains are Ethereum, Avalanche, OP Mainnet, Arbitrum, Base, Polygon PoS,
 - **Status bar and step tracker.** Each transfer moves through burn, Circle attestation, mint and complete.
 - **Fast or Standard on V2.** Fast settles in seconds and pays the fee Iris quotes, which is deducted from the amount. Standard is free on most routes but waits for source finality, about 15–20 minutes on Ethereum and its rollups.
 - **Automatic mint prompt.** Once Circle attests a transfer started on this page, the destination wallet asks you to sign the mint. If you decline, a Mint now button appears. On Solana, the page creates the recipient's USDC account first if it does not exist.
-- **History in the browser.** Transfers are saved in localStorage and resume after a refresh. Look up any burn by source chain and transaction hash, or use "Find my Noble burns" to pull your recent Noble burns from the chain.
+- **History in the browser.** Transfers are saved in localStorage and resume after a refresh. Look up any burn by source chain and transaction hash, or pick a chain and use "Find my burns" to pull the connected wallet's recent burns there. Noble is searched by sender. Solana uses the sender's denylist account, which every V2 burn passes. EVM chains have no sender index on public RPCs, so the page scans TokenMessengerV2 logs back from the head for up to 40 calls and says how far back it reached: about two months on Ethereum, but only a day or two on fast chains like Arbitrum.
 
 ## How it works
 

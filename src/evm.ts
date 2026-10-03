@@ -1,4 +1,4 @@
-import { encodePacked, keccak256, parseAbi, toHex, type EIP1193Provider, type Hex } from "viem";
+import { encodePacked, keccak256, parseAbi, parseAbiItem, toHex, type EIP1193Provider, type Hex } from "viem";
 import type { Keplr } from "@keplr-wallet/types";
 import { evmChain, publicClient, type Version } from "./chains";
 
@@ -84,6 +84,64 @@ export async function isMinted(src: number, dst: number, version: Version, nonce
   const key = version === 1 ? keccak256(encodePacked(["uint32", "uint64"], [src, BigInt(nonce)])) : (nonce as Hex);
   const used = await publicClient(dst).readContract({ address: messageTransmitter(dst, version), abi: usedNoncesAbi, functionName: "usedNonces", args: [key] });
   return used !== 0n;
+}
+
+const depositForBurnEvent = parseAbiItem(
+  "event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)",
+);
+
+export interface EvmBurn {
+  hash: Hex;
+  dst: number;
+  amount: bigint;
+  mintRecipient: Hex;
+  speed: "fast" | "standard";
+  timestamp: number;
+}
+
+// Public RPCs have no index by sender and cap how many blocks one getLogs call may span, so this walks
+// back from the head in chunks (halving the chunk when an RPC refuses it) for a fixed number of calls.
+export async function findBurns(domain: number, depositor: Hex, maxCalls = 40): Promise<{ burns: EvmBurn[]; since: number }> {
+  const client = publicClient(domain);
+  const latest = await client.getBlockNumber();
+  const found: Omit<EvmBurn, "timestamp">[] = [];
+  const blocks = new Map<Hex, bigint>();
+  let span = 10_000n;
+  let to = latest;
+  for (let calls = 0; calls < maxCalls && to > 0n && found.length < 20; ) {
+    // Four ranges at a time, newest first.
+    const ranges: [bigint, bigint][] = [];
+    for (let end = to; ranges.length < 4 && end > 0n; ) {
+      const start = end >= span ? end - span + 1n : 0n;
+      ranges.push([start, end]);
+      end = start - 1n;
+    }
+    calls += ranges.length;
+    let results;
+    try {
+      results = await Promise.all(
+        ranges.map(([fromBlock, toBlock]) => client.getLogs({ address: evmChain(domain).tokenMessengerV2, event: depositForBurnEvent, args: { depositor }, fromBlock, toBlock })),
+      );
+    } catch (e) {
+      if (span <= 500n) throw e;
+      span /= 2n;
+      continue;
+    }
+    for (const l of results.flatMap((logs) => logs.reverse())) {
+      blocks.set(l.transactionHash, l.blockNumber);
+      found.push({
+        hash: l.transactionHash,
+        dst: l.args.destinationDomain!,
+        amount: l.args.amount!,
+        mintRecipient: l.args.mintRecipient!,
+        speed: l.args.minFinalityThreshold! <= FINALITY.fast ? "fast" : "standard",
+      });
+    }
+    to = ranges[ranges.length - 1][0] - 1n;
+  }
+  const times = new Map<bigint, number>();
+  for (const n of new Set([...blocks.values(), to + 1n])) times.set(n, Number((await client.getBlock({ blockNumber: n })).timestamp) * 1000);
+  return { burns: found.map((b) => ({ ...b, timestamp: times.get(blocks.get(b.hash)!)! })), since: times.get(to + 1n)! };
 }
 
 export const usdcBalance = (domain: number, owner: Hex) =>

@@ -5,13 +5,14 @@ import { PublicKey } from "@solana/web3.js";
 import type { WalletAccount } from "@wallet-standard/base";
 import { encodeFunctionData, formatEther, formatUnits, isAddress, pad, toBytes, toHex, type EIP1193Provider, type Hex } from "viem";
 import { MsgDepositForBurn, MsgDepositForBurnTypeUrl } from "./cctpProto";
-import { CHAINS, NOBLE, SOLANA, addressUrl, chain, evmChain, gasSymbol, publicClient, route, txUrl, type Version } from "./chains";
+import { CHAINS, NOBLE, SOLANA, addressUrl, chain, evmChain, formatRecipient, gasSymbol, publicClient, route, txUrl, type Version } from "./chains";
 import {
   FINALITY,
   depositForBurnV2Abi,
   discoverWallets,
   erc20Abi,
   evmWallets,
+  findBurns as findEvmBurns,
   isMinted as evmIsMinted,
   messageTransmitter,
   receiveMessageAbi,
@@ -208,7 +209,7 @@ async function connectKeplr() {
   notice = undefined;
   log(`Connected Noble ${wallet.noble}`);
   await refreshBalances();
-  await scanBurns();
+  await scanBurns(NOBLE.domain);
 }
 
 async function connectEvm(id: string) {
@@ -562,6 +563,8 @@ function mintNow(id: string) {
 
 // ---------- history lookup ----------
 
+const canReceive = (domain: number) => CHAINS.some((c) => c.domain === domain && c.kind !== "noble");
+
 async function lookup() {
   const s = Number($<HTMLSelectElement>("lookup-src").value);
   const raw = $("lookup").value.trim();
@@ -579,7 +582,7 @@ async function lookup() {
   } else {
     const msg = await fetchMessage(s, hash);
     if (!msg) throw new Error(`Circle has no CCTP burn for that hash on ${chain(s).name} yet`);
-    if (!CHAINS.some((c) => c.domain === msg.dst && c.kind !== "noble")) throw new Error(`That burn goes to CCTP domain ${msg.dst}, which this page cannot mint on`);
+    if (!canReceive(msg.dst)) throw new Error(`That burn goes to CCTP domain ${msg.dst}, which this page cannot mint on`);
     let createdAt: number;
     if (chain(s).kind === "solana") createdAt = await sol.txTime(hash);
     else {
@@ -595,19 +598,46 @@ async function lookup() {
   track(t);
 }
 
-async function scanBurns() {
-  if (!wallet.noble) return;
-  const burns = await listNobleBurns(wallet.noble);
-  let added = 0;
-  for (const b of burns) {
-    const id = `${NOBLE.domain}:${b.hash}`;
-    if (transfers.some((t) => t.id === id)) continue;
-    addTransfer({ id, src: NOBLE.domain, dst: b.dst, version: 1, burnTx: b.hash, from: b.from, recipient: b.recipient, amount: b.amount, createdAt: b.timestamp, status: "attesting", origin: "found" });
-    added++;
+// Finds the connected wallet's recent burns on a chain and adds the ones not already in the history.
+async function scanBurns(s: number): Promise<string> {
+  const name = chain(s).name;
+  const from = account(s);
+  if (!from) throw new Error(`Connect ${walletName(s)} to find your burns on ${name}`);
+  setNotice(`Searching ${name} for burns from ${short(from)}…`, "busy");
+  const found: Transfer[] = [];
+  let scope = "";
+  const kind = chain(s).kind;
+  if (kind === "noble") {
+    for (const b of await listNobleBurns(from)) {
+      found.push({ id: `${s}:${b.hash}`, src: s, dst: b.dst, version: 1, burnTx: b.hash, from: b.from, recipient: b.recipient, amount: b.amount, createdAt: b.timestamp, status: "attesting", origin: "found" });
+    }
+  } else if (kind === "evm") {
+    const { burns, since } = await findEvmBurns(s, from as Hex);
+    scope = ` since ${new Date(since).toLocaleString()}`;
+    for (const b of burns.filter((b) => canReceive(b.dst))) {
+      found.push({ id: `${s}:${b.hash}`, src: s, dst: b.dst, version: 2, speed: b.speed, burnTx: b.hash, from, recipient: formatRecipient(b.dst, b.mintRecipient), amount: b.amount.toString(), createdAt: b.timestamp, status: "attesting", origin: "found" });
+    }
+  } else {
+    for (const { signature, time } of await sol.findBurnSignatures(new PublicKey(from))) {
+      const id = `${s}:${signature}`;
+      const known = transfers.find((t) => t.id === id);
+      if (known) {
+        found.push(known);
+        continue;
+      }
+      const msg = await fetchMessage(s, signature);
+      if (!msg || !canReceive(msg.dst)) continue;
+      found.push({ id, src: s, dst: msg.dst, version: msg.version, burnTx: signature, from, recipient: msg.recipient, amount: msg.amount, fee: msg.fee, createdAt: time, status: "attesting", origin: "found" });
+    }
   }
-  log(`Found ${burns.length} CCTP burns on Noble for this address (${added} new)`);
+  const added = found.filter((t) => !transfers.some((x) => x.id === t.id));
+  added.forEach(addTransfer);
+  notice = undefined;
+  const summary = `Found ${found.length} CCTP burn${found.length === 1 ? "" : "s"} on ${name}${scope} (${added.length} new).`;
+  log(`${summary} Sender ${from}.`);
   resumeAll();
   render();
+  return summary;
 }
 
 function resumeAll() {
@@ -763,7 +793,9 @@ function render() {
   $("recipient").placeholder = toSolana ? "Solana address" : "0x…";
   $("burn").textContent = `Burn on ${chain(src).name}`;
   $<HTMLButtonElement>("burn").disabled = !version || !account(src) || (src === NOBLE.domain && (!wallet.nobleFee || wallet.paused));
-  $<HTMLButtonElement>("scan").disabled = !wallet.client;
+  const lookupSrc = Number($<HTMLSelectElement>("lookup-src").value);
+  $("scan").textContent = `Find my burns on ${chain(lookupSrc).name}`;
+  $<HTMLButtonElement>("scan").disabled = !account(lookupSrc);
   $("fee-info").textContent = feeInfo(version);
 
   const active = transfers.find((t) => t.id === selected);
@@ -854,7 +886,8 @@ $("sol-wallet").addEventListener("change", () => {
 });
 $("burn").addEventListener("click", guard(burn));
 $("lookup-btn").addEventListener("click", guard(lookup));
-$("scan").addEventListener("click", guard(scanBurns));
+$("scan").addEventListener("click", guard(async () => setNotice(await scanBurns(Number($<HTMLSelectElement>("lookup-src").value)), "ok")));
+$("lookup-src").addEventListener("change", render);
 $("src").addEventListener("change", () => setRoute({ src: Number($<HTMLSelectElement>("src").value) }));
 $("dst").addEventListener("change", () => setRoute({ dst: Number($<HTMLSelectElement>("dst").value) }));
 for (const s of ["fast", "standard"] as const) $(`speed-${s}`).addEventListener("change", () => setRoute({ speed: s }));

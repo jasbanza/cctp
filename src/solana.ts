@@ -153,6 +153,13 @@ export function depositForBurn(owner: PublicKey, amount: bigint, dst: number, mi
   return { ix, eventData };
 }
 
+// Every V2 burn passes the sender's denylist PDA, which nothing else touches, so its signatures are
+// exactly the owner's burns.
+export async function findBurnSignatures(owner: PublicKey, limit = 20): Promise<{ signature: string; time: number }[]> {
+  const sigs = await connection.getSignaturesForAddress(pda(TOKEN_MESSENGER_MINTER[2], "denylist_account", owner), { limit });
+  return sigs.filter((s) => !s.err).map((s) => ({ signature: s.signature, time: (s.blockTime ?? 0) * 1000 }));
+}
+
 // ---------- mint ----------
 
 interface Parsed {
